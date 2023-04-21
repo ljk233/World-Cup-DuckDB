@@ -153,3 +153,5 @@ cython_debug/
 
 # User added
 .virtual_documents
+data/raw/*
+data/stage/*
