@@ -6,6 +6,7 @@ Import the dependencies.
 
 ```python
 import os
+import shutil
 import requests
 import pandas as pd
 import polars as pl
@@ -223,7 +224,7 @@ This is a new table.
 
 ```python
 # INITIALISE THE LAZYFRAME
-event_ldf = (
+event_type_ldf = (
     pl.DataFrame({
         'orig_name': [
             'goal',
@@ -239,7 +240,7 @@ event_ldf = (
     .lazy()
     .with_row_count(offset=1)
     .select(
-        ('EV-' + pl.col('row_nr').cast(str)).alias('id'),
+        ('EVT-' + pl.col('row_nr').cast(str)).alias('id'),
         pl.col('orig_name').str.replace('_', ' ').alias('name'),
         (
             pl.when(pl.col('orig_name').is_in(['goal', 'own goal', 'penalty']))
@@ -255,16 +256,16 @@ event_ldf = (
 
 # CREATE THE TABLE
 conn.execute(
-    """CREATE OR REPLACE TABLE event (
-        id   TEXT PRIMARY KEY,
-        name TEXT,
-        type TEXT
+    """CREATE OR REPLACE TABLE event_type (
+        id         TEXT PRIMARY KEY,
+        name       TEXT,
+        super_type TEXT
     );
     """
 )
 
 # LOAD THE LAZYFRAME
-load_ldf(conn, 'event', event_ldf.drop('orig_name'))
+load_ldf(conn, 'event_type', event_type_ldf.drop('orig_name'))
 ```
 
 ### `federation`
@@ -818,6 +819,81 @@ conn.execute(
 load_ldf(conn, 'tournament_schedule', tournament_schedule_ldf)
 ```
 
+### `tournament_manager`
+
+( ***tournament_id***, ***manager_id***, *team_id* )
+
+```python
+# EXTRACT-TRANSFORM
+tournament_manager_ldf = (
+    pl.read_csv(
+        get_path('manager_appointments'),
+        columns=[1, 3, 6],
+    )
+    .lazy()
+)
+
+# CREATE THE TABLE
+conn.execute(
+    """CREATE OR REPLACE TABLE tournament_manager (
+        tournament_id TEXT REFERENCES tournament (id),
+        team_id       TEXT REFERENCES team (id),
+        manager_id    TEXT REFERENCES manager (id),
+        PRIMARY KEY (tournament_id, manager_id)
+    );
+    """
+)
+
+# LOAD THE LAZYFRAME
+load_ldf(conn, 'tournament_manager', tournament_manager_ldf)
+```
+
+### `tournament_squad`
+
+( ***tournament_id***, ***team_id***, ***player_id***, *position_id* )
+
+```python
+tournament_team_player_ldf = (
+    pl.read_csv(
+        get_path('squads'),
+        columns=[1, 3, 6, 9, 10, 11],
+    )
+    .lazy()
+    .with_columns(
+        pl.when(pl.col('shirt_number') != 0).then(pl.col('shirt_number'))
+        .keep_name()
+    )
+    .join(
+        position_ldf,
+        on='position_name'
+    )
+    .select(
+        'tournament_id',
+        'team_id',
+        'player_id',
+        pl.col('shirt_number').cast(str),
+        pl.col('id').alias('position_id')
+    )
+)
+tournament_team_player_ldf.schema
+
+# CREATE THE TABLE
+conn.execute(
+    """CREATE OR REPLACE TABLE tournament_squad (
+        tournament_id TEXT REFERENCES tournament (id),
+        team_id       TEXT REFERENCES team (id),
+        player_id     TEXT REFERENCES player (id),
+        shirt_number  TEXT,
+        position_id   TEXT REFERENCES position (id),
+        PRIMARY KEY (tournament_id, team_id, player_id)
+    );
+    """
+)
+
+# LOAD THE LAZYFRAME
+load_ldf(conn, 'tournament_squad', tournament_team_player_ldf)
+```
+
 ### `tournament_team`
 
 ( ***tournament_id***, ***team_id*** )
@@ -866,82 +942,6 @@ conn.execute(
 
 # LOAD THE LAZYFRAME
 load_ldf(conn, 'tournament_team', tournament_team_ldf)
-```
-
-### `tournament_team_manager`
-
-( ***tournament_id***, ***team_id***, ***manager_id*** )
-
-```python
-# EXTRACT-TRANSFORM
-tournament_team_manager_ldf = (
-    pl.read_csv(
-        get_path('manager_appointments'),
-        columns=[1, 3, 6],
-    )
-    .lazy()
-)
-tournament_team_manager_ldf.schema
-
-# CREATE THE TABLE
-conn.execute(
-    """CREATE OR REPLACE TABLE tournament_team_manager (
-        tournament_id TEXT REFERENCES tournament (id),
-        team_id       TEXT REFERENCES team (id),
-        manager_id    TEXT REFERENCES manager (id),
-        PRIMARY KEY (tournament_id, team_id, manager_id)
-    );
-    """
-)
-
-# LOAD THE LAZYFRAME
-load_ldf(conn, 'tournament_team_manager', tournament_team_manager_ldf)
-```
-
-### `tournament_team_player`
-
-( ***tournament_id***, ***team_id***, ***player_id***, *position_id* )
-
-```python
-tournament_team_player_ldf = (
-    pl.read_csv(
-        get_path('squads'),
-        columns=[1, 3, 6, 9, 10, 11],
-    )
-    .lazy()
-    .with_columns(
-        pl.when(pl.col('shirt_number') != 0).then(pl.col('shirt_number'))
-        .keep_name()
-    )
-    .join(
-        position_ldf,
-        on='position_name'
-    )
-    .select(
-        'tournament_id',
-        'team_id',
-        'player_id',
-        pl.col('shirt_number').cast(str),
-        pl.col('id').alias('position_id')
-    )
-)
-tournament_team_player_ldf.schema
-
-# CREATE THE TABLE
-conn.execute(
-    """CREATE OR REPLACE TABLE tournament_squad (
-        tournament_id TEXT REFERENCES tournament (id),
-        team_id       TEXT REFERENCES team (id),
-        player_id     TEXT REFERENCES player (id),
-        shirt_number  TEXT,
-        position_id   TEXT REFERENCES position (id),
-        PRIMARY KEY (tournament_id, team_id, player_id)
-    );
-    """
-)
-
-# LOAD THE LAZYFRAME
-load_ldf(conn, 'tournament_squad', tournament_team_player_ldf)
 ```
 
 ### `match`
@@ -1048,12 +1048,12 @@ conn.execute(
 load_ldf(conn, 'match', match_ldf)
 ```
 
-### `match_event`
+### `event`
 
 ( **id**, *match_id*, *team_id*, *player_id*, *event_id* )
 
 ```python
-match_event_ldf = (
+event_ldf = (
     pl.concat(
         items=[
             (
@@ -1111,33 +1111,32 @@ match_event_ldf = (
     )
     .lazy()
     .join(
-        event_ldf,
+        event_type_ldf,
         left_on='variable',
         right_on='orig_name'
     )
     .with_row_count(offset=1)
     .select(
-        ('MEV-' + pl.col('row_nr').cast(str)).alias('id'),
+        ('EV-' + pl.col('row_nr').cast(str)).alias('id'),
         'match_id',
         'team_id',
         'player_id',
-        pl.col('id').alias('event_id'),
+        pl.col('id').alias('event_type_id'),
         'minute_label',
         'minute_regulation',
         'minute_stoppage',
         'match_period',
     )
 )
-match_event_ldf.schema
 
 # CREATE THE TABLE
 conn.execute(
-   """CREATE OR REPLACE TABLE match_event (
+   """CREATE OR REPLACE TABLE event (
         id                TEXT PRIMARY KEY,
         match_id          TEXT REFERENCES match (id),
         team_id           TEXT REFERENCES team (id),
         player_id         TEXT REFERENCES player (id),
-        event_id          TEXT REFERENCES event (id),
+        event_type_id     TEXT REFERENCES event_type (id),
         minute_label      TEXT,
         minute_regulation INTEGER,
         minute_stoppage   INTEGER,
@@ -1147,16 +1146,16 @@ conn.execute(
 )
 
 # LOAD THE LAZYFRAME
-load_ldf(conn, 'match_event', match_event_ldf)
+load_ldf(conn, 'event', event_ldf)
 ```
 
-### `match_penalty_kick`
+### `penalty_kick`
 
 ( **id**, *match_id*, *team_id*, *player_id* )
 
 ```python
 # EXTRACT-TRANSFORM
-match_penalty_kick_ldf = (
+penalty_kick_ldf = (
     pl.read_csv(
         get_path('penalty_kicks'),
         columns=[1, 4, 9, 14, 18]
@@ -1166,11 +1165,10 @@ match_penalty_kick_ldf = (
         pl.col('converted').cast(bool)
     )
 )
-match_penalty_kick_ldf.schema
 
 # CREATE THE TABLE
 conn.execute(
-   """CREATE OR REPLACE TABLE match_penalty_kick (
+   """CREATE OR REPLACE TABLE penalty_kick (
         id          TEXT PRIMARY KEY,
         match_id    TEXT REFERENCES match (id),
         team_id     TEXT REFERENCES team (id),
@@ -1181,7 +1179,50 @@ conn.execute(
 )
 
 # LOAD THE LAZYFRAME
-load_ldf(conn, 'match_penalty_kick', match_penalty_kick_ldf)
+load_ldf(conn, 'penalty_kick', penalty_kick_ldf)
+```
+
+### `match_player`
+
+( ***match_id***, ***player_id***, *position_id*, *team_id* )
+
+```python
+match_player_ldf = (
+    pl.read_csv(
+        get_path('player_appearances'),
+        columns=[3, 8, 13, 17, 18, 19, 21],
+    )
+    .lazy()
+    .join(
+        position_ldf.rename({'id': 'position_id'}),
+        on='position_code'
+    )
+    .select(
+        'match_id',
+        'team_id',
+        'player_id',
+        'position_id',
+        pl.col('starter').cast(bool),
+        pl.col('captain').cast(bool)
+    )
+)
+
+# CREATE THE TABLE
+conn.execute(
+   """CREATE OR REPLACE TABLE match_player (
+        match_id    TEXT REFERENCES match (id),
+        team_id     TEXT REFERENCES team (id),
+        player_id   TEXT REFERENCES player (id),
+        position_id TEXT REFERENCES position (id),
+        is_starter  BOOLEAN,
+        is_captain  BOOLEAN,
+        PRIMARY KEY (match_id, player_id)
+    );
+    """
+)
+
+# LOAD THE LAZYFRAME
+load_ldf(conn, 'match_player', match_player_ldf)
 ```
 
 ### `match_replay`
@@ -1224,49 +1265,6 @@ conn.execute(
 
 # LOAD THE LAZYFRAME
 load_ldf(conn, 'match_replay', match_replay_ldf)
-```
-
-### `match_team_player`
-
-( ***match_id***, ***team_id***, ***player_id***, *position_id* )
-
-```python
-match_team_player_ldf = (
-    pl.read_csv(
-        get_path('player_appearances'),
-        columns=[3, 8, 13, 17, 18, 19, 21],
-    )
-    .lazy()
-    .join(
-        position_ldf.rename({'id': 'position_id'}),
-        on='position_code'
-    )
-    .select(
-        'match_id',
-        'team_id',
-        'player_id',
-        'position_id',
-        pl.col('starter').cast(bool),
-        pl.col('captain').cast(bool)
-    )
-)
-
-# CREATE THE TABLE
-conn.execute(
-   """CREATE OR REPLACE TABLE match_team_player (
-        match_id    TEXT REFERENCES match (id),
-        team_id     TEXT REFERENCES team (id),
-        player_id   TEXT REFERENCES player (id),
-        position_id TEXT REFERENCES position (id),
-        is_starter  BOOLEAN,
-        is_captain  BOOLEAN,
-        PRIMARY KEY (match_id, team_id, player_id)
-    );
-    """
-)
-
-# LOAD THE LAZYFRAME
-load_ldf(conn, 'match_team_player', match_team_player_ldf)
 ```
 
 ### `match_team`
@@ -1429,12 +1427,41 @@ load_ldf(
 
 ## Export the database to stage
 
+We first export a backup of the database, and then we use *pandas*  to create and export a tabular version of the schema.
+
 ```python
 conn.execute("EXPORT DATABASE '../data/stage';")
+```
+
+Copy the schema to the `docs` folder.
+
+```python
+shutil.copy('../data/stage/schema.sql', '../docs/schema.sql')
+```
+
+
+
+```python
+(
+    conn.execute(f"""
+        SELECT
+            table_name AS table,
+            ordinal_position AS "#",
+            column_name AS column,
+            data_type AS dtype,
+            CASE
+                WHEN column_name = 'id' THEN 'PK'
+                WHEN contains(column_name, '_id') THEN 'FK'
+            END AS constraint
+        FROM
+            information_schema.columns
+    """)
+    .df().to_csv('../docs/schema.csv', index=False)
+)
 ```
 
 ## Close the connection
 
 ```python
-conn.close()
+# conn.close()
 ```
